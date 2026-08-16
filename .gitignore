@@ -74,3 +74,4 @@ desktop.ini
 
 # Logs and databases (keep base schema if needed, ignore sqlite logs/dbs if desired)
 *.log
+recibos/*.pdf

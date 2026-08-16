@@ -11,16 +11,22 @@ Compatibilidad: Flet 0.86+ | sqlite3 (stdlib)
 """
 
 import flet as ft
+from datetime import datetime
 
 from database.db_manager import (
     obtener_clientes_para_dropdown,
     obtener_planes,
+    buscar_clientes,
+    programar_congelamiento,
+    reactivar_membresia,
+    get_connection,
     crear_membresia,
     obtener_historial_membresias,
-    buscar_clientes,
 )
+from utils.pdf_manager import generar_recibo_pdf
+from typing import Callable
 
-def RenovacionesView() -> ft.Control:
+def RenovacionesView(require_auth: Callable = None) -> ft.Control:
     """
     Vista de Renovaciones y Membresías.
     """
@@ -167,6 +173,7 @@ def RenovacionesView() -> ft.Control:
             ft.DataColumn(ft.Text("Inicio",     size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Vence",      size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Estado",     size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Acciones",   size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
         ],
         rows=[],
         heading_row_color=_hdr_bg,
@@ -187,27 +194,130 @@ def RenovacionesView() -> ft.Control:
         snack.open = True
         page.update()
 
-    def _build_rows(page: ft.Page):
-        historial = obtener_historial_membresias()
+    def _build_rows(page: ft.Page, busqueda: str = None):
+        historial = obtener_historial_membresias(busqueda)
         filas = []
 
         for h in historial:
-            estado_color = ft.Colors.GREEN_400 if h["estado"] == "ACTIVA" else ft.Colors.RED_400
+            mid = h["id"]
+            estado = h["estado"]
+            estado_color = ft.Colors.GREEN_400 if estado == "ACTIVA" else (ft.Colors.ORANGE_400 if estado == "SUSPENDIDA" else ft.Colors.RED_400)
+            
+            acciones = []
+            if estado == "ACTIVA":
+                def _on_congelar(e, m_id=mid):
+                    justificacion_tf = ft.TextField(label="Justificación", multiline=True, min_lines=2, border_color=ft.Colors.with_opacity(0.12, ft.Colors.WHITE), bgcolor=ft.Colors.with_opacity(0.06, ft.Colors.WHITE), color=ft.Colors.WHITE)
+                    
+                    fecha_inicio_dp = ft.DatePicker(
+                        first_date=datetime.now(),
+                        help_text="Seleccionar fecha de inicio"
+                    )
+                    fecha_fin_dp = ft.DatePicker(
+                        first_date=datetime.now(),
+                        help_text="Seleccionar fecha de fin"
+                    )
+                    e.page.overlay.extend([fecha_inicio_dp, fecha_fin_dp])
+                    
+                    lbl_inicio = ft.Text(datetime.now().date().strftime("%Y-%m-%d"), color=ft.Colors.WHITE70)
+                    lbl_fin = ft.Text("Indefinido", color=ft.Colors.WHITE70)
+                    
+                    def change_inicio(ev):
+                        if fecha_inicio_dp.value:
+                            lbl_inicio.value = fecha_inicio_dp.value.strftime("%Y-%m-%d")
+                            fecha_fin_dp.first_date = fecha_inicio_dp.value
+                        ev.page.update()
+                        
+                    def change_fin(ev):
+                        if fecha_fin_dp.value:
+                            lbl_fin.value = fecha_fin_dp.value.strftime("%Y-%m-%d")
+                        ev.page.update()
+
+                    fecha_inicio_dp.on_change = change_inicio
+                    fecha_fin_dp.on_change = change_fin
+                    
+                    btn_inicio = ft.ElevatedButton("Inicio", icon=ft.Icons.CALENDAR_MONTH, on_click=lambda _: setattr(fecha_inicio_dp, "open", True) or e.page.update())
+                    btn_fin = ft.ElevatedButton("Fin", icon=ft.Icons.CALENDAR_MONTH, on_click=lambda _: setattr(fecha_fin_dp, "open", True) or e.page.update())
+                    btn_fin.disabled = True
+                    
+                    def toggle_indef(ev):
+                        btn_fin.disabled = indefinido_cb.value
+                        if indefinido_cb.value:
+                            lbl_fin.value = "Indefinido"
+                        else:
+                            lbl_fin.value = fecha_fin_dp.value.strftime("%Y-%m-%d") if fecha_fin_dp.value else "No seleccionada"
+                        ev.page.update()
+                        
+                    indefinido_cb = ft.Checkbox(label="Fin Indefinido", value=True, on_change=toggle_indef)
+                    
+                    def confirm(ev):
+                        inicio_val = fecha_inicio_dp.value.strftime("%Y-%m-%d") if fecha_inicio_dp.value else datetime.now().date().strftime("%Y-%m-%d")
+                        fin_val = None
+                        if not indefinido_cb.value and fecha_fin_dp.value:
+                            fin_val = fecha_fin_dp.value.strftime("%Y-%m-%d")
+                            
+                        try:
+                            programar_congelamiento(m_id, justificacion_tf.value or "Sin justificación", inicio_val, fin_val)
+                            dialog.open = False
+                            _refresh(ev.page)
+                            _show_snack(ev.page, "⏸ Congelamiento programado.", ft.Colors.ORANGE_900)
+                        except Exception as ex:
+                            _show_snack(ev.page, f"Error: {ex}", ft.Colors.RED_900)
+
+                    def cancel(ev):
+                        dialog.open = False
+                        ev.page.update()
+
+                    dialog = ft.AlertDialog(
+                        modal=True,
+                        title=ft.Text("Congelar Membresía", weight=ft.FontWeight.BOLD),
+                        content=ft.Column([
+                            justificacion_tf,
+                            ft.Row([btn_inicio, lbl_inicio]),
+                            ft.Row([btn_fin, lbl_fin]),
+                            indefinido_cb
+                        ], tight=True, spacing=10),
+                        actions=[
+                            ft.TextButton("Cancelar", on_click=cancel),
+                            ft.TextButton("Confirmar", on_click=confirm, style=ft.ButtonStyle(color=ft.Colors.ORANGE_400))
+                        ],
+                        bgcolor="#1A1D24",
+                    )
+                    e.page.overlay.append(dialog)
+                    dialog.open = True
+                    e.page.update()
+
+                acciones.append(
+                    ft.IconButton(ft.Icons.PAUSE_ROUNDED, icon_size=18, icon_color=ft.Colors.ORANGE_400, tooltip="Congelar", on_click=_on_congelar)
+                )
+            elif estado == "SUSPENDIDA":
+                def _on_reactivar(e, m_id=mid):
+                    try:
+                        res = reactivar_membresia(m_id)
+                        _refresh(e.page)
+                        _show_snack(e.page, f"▶ Membresía reactivada. Nuevo vencimiento: {res['fecha_vencimiento']}", ft.Colors.GREEN_900)
+                    except Exception as ex:
+                        _show_snack(e.page, f"Error: {ex}", ft.Colors.RED_900)
+                        
+                acciones.append(
+                    ft.IconButton(ft.Icons.PLAY_ARROW_ROUNDED, icon_size=18, icon_color=ft.Colors.GREEN_400, tooltip="Reactivar", on_click=_on_reactivar)
+                )
+
             filas.append(
                 ft.DataRow(cells=[
-                    ft.DataCell(ft.Text(str(h["id"]), color=ft.Colors.WHITE54)),
+                    ft.DataCell(ft.Text(str(mid), color=ft.Colors.WHITE54)),
                     ft.DataCell(ft.Text(h["cliente_nombre"], color=ft.Colors.WHITE, weight=ft.FontWeight.W_500)),
                     ft.DataCell(ft.Text(h["plan_nombre"],    color=ft.Colors.CYAN_300)),
                     ft.DataCell(ft.Text(h["fecha_inicio"],   color=ft.Colors.WHITE70)),
                     ft.DataCell(ft.Text(h["fecha_vencimiento"], color=ft.Colors.WHITE70)),
                     ft.DataCell(
                         ft.Container(
-                            content=ft.Text(h["estado"], size=10, weight=ft.FontWeight.BOLD, color=estado_color),
+                            content=ft.Text(estado, size=10, weight=ft.FontWeight.BOLD, color=estado_color),
                             padding=ft.Padding(left=8, top=4, right=8, bottom=4),
                             border_radius=6,
                             bgcolor=ft.Colors.with_opacity(0.12, estado_color)
                         )
                     ),
+                    ft.DataCell(ft.Row(controls=acciones, spacing=0)),
                 ])
             )
             
@@ -232,7 +342,7 @@ def RenovacionesView() -> ft.Control:
             ]
 
     def _refresh(page: ft.Page):
-        _build_rows(page)
+        _build_rows(page, search_tf.value)
         page.update()
 
     def _clear_form():
@@ -244,6 +354,8 @@ def RenovacionesView() -> ft.Control:
         plan_dropdown.value                = None
         error_label.visible                = False
         plan_dropdown.border_color         = _fbrd
+        fecha_inicio_seleccionada[0]       = None
+        fecha_inicio_label.value           = "Inicio: Hoy (YYYY-MM-DD)"
 
     def on_register(e: ft.ControlEvent):
         page = e.page
@@ -271,14 +383,71 @@ def RenovacionesView() -> ft.Control:
             return
 
         try:
-            resultado = crear_membresia(int(cliente_id), int(plan_id))
+            resultado = crear_membresia(int(cliente_id), int(plan_id), fecha_inicio_seleccionada[0])
+            
+            # Obtener datos para PDF
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT cedula, nombre FROM clientes WHERE id = ?", (int(cliente_id),))
+                c_data = cur.fetchone()
+                cur.execute("SELECT nombre, precio FROM planes WHERE id = ?", (int(plan_id),))
+                p_data = cur.fetchone()
+            
+            try:
+                generar_recibo_pdf(
+                    nombre_cliente=c_data["nombre"],
+                    cedula=c_data["cedula"],
+                    nombre_plan=p_data["nombre"],
+                    precio=p_data["precio"],
+                    fecha_inicio=resultado["fecha_inicio"],
+                    fecha_vencimiento=resultado["fecha_vencimiento"]
+                )
+                pdf_msg = " Generando recibo..."
+            except Exception as e_pdf:
+                pdf_msg = f" (Error PDF: {e_pdf})"
+
             _clear_form()
             _refresh(page)
-            _show_snack(page, f"✅  Membresía activada. Vence el {resultado['fecha_vencimiento']}.", ft.Colors.GREEN_900)
+            _show_snack(page, f"✅  Pago registrado exitosamente.{pdf_msg}", ft.Colors.GREEN_900)
         except Exception as ex:
             error_label.value = f"Error al guardar: {ex}"
             error_label.visible = True
             page.update()
+
+    # ── Calendario de Fecha de Inicio ──────────────────────────────
+    fecha_inicio_seleccionada = [None]
+    fecha_inicio_label = ft.Text("Inicio: Hoy (YYYY-MM-DD)", size=13, color=ft.Colors.WHITE70)
+
+    def on_date_change(e):
+        if e.control.value:
+            fecha_str = e.control.value.strftime("%Y-%m-%d")
+            fecha_inicio_seleccionada[0] = fecha_str
+            fecha_inicio_label.value = f"Inicio: {fecha_str}"
+        else:
+            fecha_inicio_seleccionada[0] = None
+            fecha_inicio_label.value = "Inicio: Hoy (YYYY-MM-DD)"
+        fecha_inicio_label.update()
+
+    dp_inicio = ft.DatePicker(on_change=on_date_change)
+
+    def on_calendar_click(e):
+        if dp_inicio not in e.page.overlay:
+            e.page.overlay.append(dp_inicio)
+        dp_inicio.open = True
+        e.page.update()
+
+    btn_calendario = ft.IconButton(
+        icon=ft.Icons.CALENDAR_TODAY_ROUNDED,
+        icon_color=ft.Colors.CYAN_400,
+        on_click=on_calendar_click,
+        tooltip="Seleccionar fecha de inicio"
+    )
+
+    fila_fecha_inicio = ft.Row(
+        controls=[fecha_inicio_label, btn_calendario],
+        spacing=8,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
 
     # ── Botón Registrar ────────────────────────────────────────────
     register_btn = ft.Button(
@@ -301,7 +470,11 @@ def RenovacionesView() -> ft.Control:
                 ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                 ft.Row(controls=[cliente_search_widget, plan_dropdown], spacing=10),
                 error_label,
-                ft.Row(controls=[register_btn], alignment=ft.MainAxisAlignment.END),
+                ft.Row(
+                    controls=[fila_fecha_inicio, register_btn],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER
+                ),
             ],
             spacing=8,
         ),
@@ -315,6 +488,19 @@ def RenovacionesView() -> ft.Control:
     )
 
     # ── Contenedor de Historial ────────────────────────────────────
+    search_tf = ft.TextField(
+        hint_text="Buscar cliente por cédula o nombre...",
+        prefix_icon=ft.Icons.SEARCH,
+        on_change=lambda e: (_build_rows(e.page, e.control.value), e.page.update()),
+        border_radius=10,
+        bgcolor=_fbg,
+        border_color=_fbrd,
+        focused_border_color=ft.Colors.CYAN_400,
+        color=ft.Colors.WHITE,
+        height=40,
+        content_padding=ft.Padding(left=12, top=0, right=12, bottom=0)
+    )
+
     history_container = ft.Container(
         content=ft.Column(
             controls=[
@@ -326,6 +512,8 @@ def RenovacionesView() -> ft.Control:
                     spacing=8,
                 ),
                 ft.Divider(height=12, color=ft.Colors.TRANSPARENT),
+                search_tf,
+                ft.Divider(height=4, color=ft.Colors.TRANSPARENT),
                 table_body,
             ],
             expand=True,

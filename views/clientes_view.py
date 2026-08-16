@@ -79,6 +79,8 @@ def ClientesView() -> ft.Control:
             ft.DataColumn(ft.Text("Cédula",    size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Nombre",    size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Teléfono",  size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Plan",      size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Días",      size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Registro",  size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Acciones",  size=12, color=ft.Colors.WHITE38, weight=ft.FontWeight.BOLD)),
         ],
@@ -109,6 +111,8 @@ def ClientesView() -> ft.Control:
             nombre   = c["nombre"]
             telefono = c["telefono"] or "—"
             fecha    = (c["fecha_registro"] or "")[:10]   # solo la fecha
+            plan_actual = c.get("plan_actual", "Sin plan")
+            dias_restantes = c.get("dias_restantes", 0)
 
             def _on_enroll(e, cname=nombre):
                 # TODO: ENROLL HOOK → iniciar captura de huella
@@ -201,11 +205,24 @@ def ClientesView() -> ft.Control:
                 spacing=0,
             )
 
+            dias_text = str(dias_restantes)
+            if dias_restantes > 5:
+                dias_color = ft.Colors.GREEN_400
+            elif dias_restantes > 0:
+                dias_color = ft.Colors.ORANGE_400
+            else:
+                dias_color = ft.Colors.RED_400
+                if plan_actual == "Sin plan":
+                    dias_text = "—"
+                    dias_color = ft.Colors.WHITE38
+
             filas.append(
                 ft.DataRow(cells=[
                     ft.DataCell(ft.Text(cedula,   color=ft.Colors.WHITE70)),
                     ft.DataCell(ft.Text(nombre,   color=ft.Colors.WHITE, weight=ft.FontWeight.W_500)),
                     ft.DataCell(ft.Text(telefono, color=ft.Colors.WHITE70)),
+                    ft.DataCell(ft.Text(plan_actual, color=ft.Colors.CYAN_300)),
+                    ft.DataCell(ft.Text(dias_text, color=dias_color, weight=ft.FontWeight.BOLD)),
                     ft.DataCell(ft.Text(fecha,    color=ft.Colors.WHITE54, size=12)),
                     ft.DataCell(acciones),
                 ])

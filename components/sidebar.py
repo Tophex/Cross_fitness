@@ -3,7 +3,7 @@ sidebar.py
 ----------
 Componente de navegación lateral fijo (Sidebar).
 
-Usa NavigationRail de Material Design con 6 destinos correspondientes
+Usa NavigationRail de Material Design con 5 destinos correspondientes
 a las secciones del sistema. Emite el índice seleccionado al padre
 (main.py) vía el callback on_navigate para el cambio dinámico de vistas.
 
@@ -11,9 +11,8 @@ a las secciones del sistema. Emite el índice seleccionado al padre
   0 → Monitor       (acceso en tiempo real)
   1 → Clientes      (gestión de miembros)
   2 → Renovaciones  (pagos y membresías)
-  3 → Planes        (catálogo de planes)
-  4 → Reportes      (historial y caja)
-  5 → Configuración (puertos COM y ajustes)
+  3 → Admin         (Planes + Reportes unificados)
+  4 → Configuración (puertos COM y ajustes)
 
 Compatibilidad: Flet 0.86+
   - ft.Icon(IconData, ...)                → primer arg posicional
@@ -32,14 +31,17 @@ from typing import Callable
 NAV_MONITOR      = 0
 NAV_CLIENTES     = 1
 NAV_RENOVACIONES = 2
-NAV_PLANES       = 3
-NAV_REPORTES     = 4
-NAV_CONFIG       = 5
+NAV_ADMIN        = 3
+NAV_CONFIG       = 4
+
+# Aliases de compatibilidad — mantener por si alguna vista los importa
+NAV_PLANES   = NAV_ADMIN   # Planes ahora vive dentro de Admin
+NAV_REPORTES = NAV_ADMIN   # Reportes ahora vive dentro de Admin
 
 
 def Sidebar(on_navigate: Callable[[int], None]) -> ft.Control:
     """
-    Construye y retorna el widget del menú lateral de 6 secciones.
+    Construye y retorna el widget del menú lateral de 5 secciones.
 
     Args:
         on_navigate: Callback invocado con el índice de la opción
@@ -102,14 +104,9 @@ def Sidebar(on_navigate: Callable[[int], None]) -> ft.Control:
                 label="Renovac.",
             ),
             ft.NavigationRailDestination(
-                ft.Icons.CARD_MEMBERSHIP_OUTLINED,
-                selected_icon=ft.Icons.CARD_MEMBERSHIP_ROUNDED,
-                label="Planes",
-            ),
-            ft.NavigationRailDestination(
-                ft.Icons.BAR_CHART_OUTLINED,
-                selected_icon=ft.Icons.BAR_CHART_ROUNDED,
-                label="Reportes",
+                ft.Icons.ADMIN_PANEL_SETTINGS_OUTLINED,
+                selected_icon=ft.Icons.ADMIN_PANEL_SETTINGS_ROUNDED,
+                label="Admin",
             ),
             ft.NavigationRailDestination(
                 ft.Icons.SETTINGS_OUTLINED,

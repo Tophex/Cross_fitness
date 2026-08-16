@@ -100,7 +100,10 @@ _DDL_STATEMENTS = [
         fecha_inicio      DATE    NOT NULL,
         fecha_vencimiento DATE    NOT NULL,
         estado            TEXT    NOT NULL DEFAULT 'ACTIVA'
-                              CHECK (estado IN ('ACTIVA', 'VENCIDA', 'SUSPENDIDA'))
+                              CHECK (estado IN ('ACTIVA', 'VENCIDA', 'SUSPENDIDA')),
+        dias_restantes_congelados INTEGER DEFAULT 0,
+        fecha_inicio_congelamiento DATE,
+        fecha_fin_congelamiento DATE
     )
     """,
 
@@ -125,6 +128,18 @@ _DDL_STATEMENTS = [
         justificacion TEXT     NOT NULL,
         fecha_hora    DATETIME NOT NULL
                           DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))
+    )
+    """,
+
+    # ── historial_congelaciones ───────────────────────────────────
+    # Registro de acciones de congelamiento y reactivación de membresías.
+    """
+    CREATE TABLE IF NOT EXISTS historial_congelaciones (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        membresia_id  INTEGER NOT NULL REFERENCES membresias(id) ON DELETE CASCADE,
+        fecha         DATE NOT NULL DEFAULT (STRFTIME('%Y-%m-%d', 'now', 'localtime')),
+        justificacion TEXT,
+        accion        TEXT NOT NULL CHECK (accion IN ('CONGELADA', 'REACTIVADA'))
     )
     """,
 
@@ -175,6 +190,44 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def obtener_historial_ingresos_rango(fecha_inicio: str, fecha_fin: str) -> list[dict]:
+    """
+    Obtiene el historial de ingresos de personas en un rango de fechas.
+    Fechas en formato YYYY-MM-DD.
+    """
+    QUERY = """
+        SELECT
+            ib.fecha_hora, c.cedula, c.nombre
+        FROM ingresos_biometricos ib
+        JOIN clientes c ON ib.cliente_id = c.id
+        WHERE date(ib.fecha_hora) BETWEEN ? AND ?
+        ORDER BY ib.fecha_hora DESC
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(QUERY, (fecha_inicio, fecha_fin))
+        return [dict(r) for r in cur.fetchall()]
+
+def obtener_historial_pagos_rango(fecha_inicio: str, fecha_fin: str) -> list[dict]:
+    """
+    Obtiene el historial de pagos de membresías en un rango de fechas.
+    Fechas en formato YYYY-MM-DD.
+    """
+    QUERY = """
+        SELECT
+            m.fecha_inicio, c.cedula, c.nombre AS cliente_nombre, p.nombre AS plan_nombre, p.precio
+        FROM membresias m
+        JOIN clientes c ON m.cliente_id = c.id
+        JOIN planes p ON m.plan_id = p.id
+        WHERE date(m.fecha_inicio) BETWEEN ? AND ?
+        ORDER BY m.fecha_inicio DESC
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(QUERY, (fecha_inicio, fecha_fin))
+        return [dict(r) for r in cur.fetchall()]
+
+
 def init_db() -> None:
     """
     Inicializa la base de datos: crea el archivo y todas las tablas si no existen.
@@ -191,6 +244,22 @@ def init_db() -> None:
         cur = conn.cursor()
         for statement in _DDL_STATEMENTS:
             cur.execute(statement)
+            
+        # Migración para la tabla membresias
+        try:
+            cur.execute("ALTER TABLE membresias ADD COLUMN dias_restantes_congelados INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cur.execute("ALTER TABLE membresias ADD COLUMN fecha_inicio_congelamiento DATE")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cur.execute("ALTER TABLE membresias ADD COLUMN fecha_fin_congelamiento DATE")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
     print(f"[DB] Base de datos lista en: {DB_PATH}")
@@ -325,43 +394,111 @@ def crear_cliente(cedula: str, nombre: str, telefono: str = "") -> int:
         return cur.lastrowid
 
 
-def obtener_clientes() -> list[sqlite3.Row]:
+def obtener_clientes() -> list[dict]:
     """
-    Retorna todos los clientes ordenados por nombre.
+    Retorna todos los clientes ordenados por nombre, incluyendo
+    su plan actual y días restantes si tienen una membresía activa.
 
     Returns:
-        list[sqlite3.Row]: Cada fila tiene columnas:
-                           row['id'], row['cedula'], row['nombre'],
-                           row['telefono'], row['fecha_registro']
+        list[dict]: Lista de diccionarios con la información del cliente.
     """
+    import sqlite3
+    from datetime import datetime
+
+    QUERY = """
+        SELECT 
+            c.id, c.cedula, c.nombre, c.telefono, c.fecha_registro,
+            p.nombre AS plan_actual,
+            m.fecha_vencimiento
+        FROM clientes c
+        LEFT JOIN (
+            SELECT cliente_id, plan_id, fecha_vencimiento
+            FROM membresias
+            WHERE estado = 'ACTIVA'
+            GROUP BY cliente_id
+            HAVING MAX(id)
+        ) m ON c.id = m.cliente_id
+        LEFT JOIN planes p ON m.plan_id = p.id
+        ORDER BY c.nombre
+    """
+    
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, cedula, nombre, telefono, fecha_registro "
-            "FROM clientes ORDER BY nombre"
-        )
-        return cur.fetchall()
+        cur.execute(QUERY)
+        filas = cur.fetchall()
+
+    hoy = datetime.now().date()
+    resultados = []
+    
+    for fila in filas:
+        cliente = dict(fila)
+        if cliente["fecha_vencimiento"]:
+            fv = datetime.strptime(cliente["fecha_vencimiento"], "%Y-%m-%d").date()
+            dias_restantes = (fv - hoy).days
+            cliente["dias_restantes"] = dias_restantes if dias_restantes >= 0 else 0
+        else:
+            cliente["plan_actual"] = "Sin plan"
+            cliente["dias_restantes"] = 0
+            
+        resultados.append(cliente)
+
+    return resultados
 
 
-def buscar_clientes(query: str) -> list[sqlite3.Row]:
+def buscar_clientes(query: str) -> list[dict]:
     """
-    Busca clientes cuyo nombre o cédula contengan el texto dado.
+    Busca clientes cuyo nombre o cédula contengan el texto dado,
+    incluyendo su plan actual y días restantes.
 
     Args:
         query: Texto a buscar (insensible a mayúsculas).
 
     Returns:
-        list[sqlite3.Row]: Clientes que coinciden, ordenados por nombre.
+        list[dict]: Clientes que coinciden, ordenados por nombre.
     """
+    import sqlite3
+    from datetime import datetime
+    
     pattern = f"%{query}%"
+    QUERY = """
+        SELECT 
+            c.id, c.cedula, c.nombre, c.telefono, c.fecha_registro,
+            p.nombre AS plan_actual,
+            m.fecha_vencimiento
+        FROM clientes c
+        LEFT JOIN (
+            SELECT cliente_id, plan_id, fecha_vencimiento
+            FROM membresias
+            WHERE estado = 'ACTIVA'
+            GROUP BY cliente_id
+            HAVING MAX(id)
+        ) m ON c.id = m.cliente_id
+        LEFT JOIN planes p ON m.plan_id = p.id
+        WHERE c.nombre LIKE ? OR c.cedula LIKE ?
+        ORDER BY c.nombre
+    """
+    
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, cedula, nombre, telefono, fecha_registro "
-            "FROM clientes WHERE nombre LIKE ? OR cedula LIKE ? ORDER BY nombre",
-            (pattern, pattern),
-        )
-        return cur.fetchall()
+        cur.execute(QUERY, (pattern, pattern))
+        filas = cur.fetchall()
+
+    hoy = datetime.now().date()
+    resultados = []
+    
+    for fila in filas:
+        cliente = dict(fila)
+        if cliente["fecha_vencimiento"]:
+            fv = datetime.strptime(cliente["fecha_vencimiento"], "%Y-%m-%d").date()
+            dias_restantes = (fv - hoy).days
+            cliente["dias_restantes"] = dias_restantes if dias_restantes >= 0 else 0
+        else:
+            cliente["plan_actual"] = "Sin plan"
+            cliente["dias_restantes"] = 0
+            
+        resultados.append(cliente)
+
+    return resultados
 
 def actualizar_cliente(cliente_id: int, cedula: str, nombre: str, telefono: str) -> None:
     """
@@ -402,13 +539,14 @@ def obtener_clientes_para_dropdown() -> list[dict]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def crear_membresia(cliente_id: int, plan_id: int) -> dict:
+def crear_membresia(cliente_id: int, plan_id: int, fecha_inicio: str = None) -> dict:
     """
-    Crea una membresía activa calculando las fechas según el plan.
+    Crea una membresía activa calculando las fechas según el plan y una fecha de inicio opcional.
 
     Args:
         cliente_id: ID del cliente.
         plan_id: ID del plan.
+        fecha_inicio: Fecha de inicio opcional (YYYY-MM-DD). Si es None, usa hoy.
 
     Returns:
         dict: Detalles de la membresía creada (incluyendo fecha de vencimiento).
@@ -426,9 +564,12 @@ def crear_membresia(cliente_id: int, plan_id: int) -> dict:
         
         dias_duracion = row_plan["dias_duracion"]
 
-        # b. Calcular fecha_inicio (fecha actual)
-        fecha_inicio_obj = datetime.now().date()
-        fecha_inicio = fecha_inicio_obj.strftime("%Y-%m-%d")
+        # b. Calcular fecha_inicio
+        if fecha_inicio is None:
+            fecha_inicio_obj = datetime.now().date()
+            fecha_inicio = fecha_inicio_obj.strftime("%Y-%m-%d")
+        else:
+            fecha_inicio_obj = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
 
         # c. Calcular fecha_vencimiento
         fecha_vencimiento_obj = fecha_inicio_obj + timedelta(days=dias_duracion)
@@ -451,15 +592,170 @@ def crear_membresia(cliente_id: int, plan_id: int) -> dict:
             "estado": "ACTIVA"
         }
 
-
-def obtener_historial_membresias() -> list[dict]:
+def programar_congelamiento(membresia_id: int, justificacion: str, fecha_inicio: str, fecha_fin: str = None) -> None:
     """
-    Devuelve las últimas renovaciones usando JOIN.
+    Programa el congelamiento de una membresía.
+    Si fecha_inicio es hoy o en el pasado, la suspende inmediatamente.
+    """
+    from datetime import datetime
+    with get_connection() as conn:
+        cur = conn.cursor()
+        
+        cur.execute("SELECT fecha_vencimiento, estado FROM membresias WHERE id = ?", (membresia_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            raise ValueError("Membresía no encontrada.")
+        if row["estado"] not in ("ACTIVA", "SUSPENDIDA"):
+            raise ValueError(f"No se puede programar en estado {row['estado']}.")
+            
+        fecha_vencimiento_obj = datetime.strptime(row["fecha_vencimiento"], "%Y-%m-%d").date()
+        fecha_inicio_obj = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+        hoy = datetime.now().date()
+        
+        dias_restantes = (fecha_vencimiento_obj - fecha_inicio_obj).days
+        if dias_restantes < 0:
+            raise ValueError("La fecha de inicio programada es posterior al vencimiento de la membresía.")
+            
+        nuevo_estado = "SUSPENDIDA" if fecha_inicio_obj <= hoy else row["estado"]
+        
+        cur.execute(
+            """
+            UPDATE membresias 
+            SET estado = ?, dias_restantes_congelados = ?, 
+                fecha_inicio_congelamiento = ?, fecha_fin_congelamiento = ?
+            WHERE id = ?
+            """,
+            (nuevo_estado, dias_restantes, fecha_inicio, fecha_fin, membresia_id)
+        )
+        
+        cur.execute(
+            """
+            INSERT INTO historial_congelaciones (membresia_id, justificacion, accion)
+            VALUES (?, ?, 'CONGELADA')
+            """,
+            (membresia_id, justificacion)
+        )
+        conn.commit()
+
+
+def reactivar_membresia(membresia_id: int) -> dict:
+    """
+    Reactivar una membresía congelada, calculando nueva fecha de vencimiento.
+    """
+    from datetime import datetime, timedelta
+    with get_connection() as conn:
+        cur = conn.cursor()
+        
+        cur.execute("SELECT dias_restantes_congelados, estado FROM membresias WHERE id = ?", (membresia_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            raise ValueError("Membresía no encontrada.")
+        if row["estado"] != "SUSPENDIDA":
+            raise ValueError(f"No se puede reactivar una membresía en estado {row['estado']}.")
+            
+        dias_restantes = row["dias_restantes_congelados"]
+        if dias_restantes is None:
+            dias_restantes = 0
+            
+        hoy = datetime.now().date()
+        nueva_fecha_vencimiento_obj = hoy + timedelta(days=dias_restantes)
+        nueva_fecha_vencimiento = nueva_fecha_vencimiento_obj.strftime("%Y-%m-%d")
+        
+        cur.execute(
+            """
+            UPDATE membresias 
+            SET estado = 'ACTIVA', fecha_vencimiento = ?, dias_restantes_congelados = 0,
+                fecha_inicio_congelamiento = NULL, fecha_fin_congelamiento = NULL
+            WHERE id = ?
+            """,
+            (nueva_fecha_vencimiento, membresia_id)
+        )
+        
+        cur.execute(
+            """
+            INSERT INTO historial_congelaciones (membresia_id, justificacion, accion)
+            VALUES (?, 'Reactivación por el usuario', 'REACTIVADA')
+            """,
+            (membresia_id,)
+        )
+        conn.commit()
+        
+        return {"fecha_vencimiento": nueva_fecha_vencimiento}
+
+def procesar_congelamientos_automaticos() -> None:
+    """
+    Se ejecuta al iniciar la app.
+    Verifica membresías ACTIVA que deberían estar SUSPENDIDA (llegó la fecha_inicio).
+    Verifica membresías SUSPENDIDA que deberían reactivarse (llegó o pasó la fecha_fin).
+    """
+    from datetime import datetime, timedelta
+    with get_connection() as conn:
+        cur = conn.cursor()
+        hoy_str = datetime.now().date().strftime("%Y-%m-%d")
+        
+        # 1. Congelar las que llegaron a su fecha_inicio_congelamiento
+        cur.execute(
+            """
+            UPDATE membresias
+            SET estado = 'SUSPENDIDA'
+            WHERE estado = 'ACTIVA' 
+              AND fecha_inicio_congelamiento IS NOT NULL
+              AND fecha_inicio_congelamiento <= ?
+            """,
+            (hoy_str,)
+        )
+        
+        # 2. Reactivar las que llegaron a su fecha_fin_congelamiento
+        cur.execute(
+            """
+            SELECT id, dias_restantes_congelados 
+            FROM membresias
+            WHERE estado = 'SUSPENDIDA' 
+              AND fecha_fin_congelamiento IS NOT NULL
+              AND fecha_fin_congelamiento <= ?
+            """,
+            (hoy_str,)
+        )
+        para_reactivar = cur.fetchall()
+        
+        hoy_obj = datetime.now().date()
+        
+        for row in para_reactivar:
+            mid = row["id"]
+            dias_restantes = row["dias_restantes_congelados"] or 0
+            
+            nueva_fecha_vencimiento_obj = hoy_obj + timedelta(days=dias_restantes)
+            nueva_fecha_vencimiento = nueva_fecha_vencimiento_obj.strftime("%Y-%m-%d")
+            
+            cur.execute(
+                """
+                UPDATE membresias 
+                SET estado = 'ACTIVA', fecha_vencimiento = ?, dias_restantes_congelados = 0,
+                    fecha_inicio_congelamiento = NULL, fecha_fin_congelamiento = NULL
+                WHERE id = ?
+                """,
+                (nueva_fecha_vencimiento, mid)
+            )
+            cur.execute(
+                """
+                INSERT INTO historial_congelaciones (membresia_id, justificacion, accion)
+                VALUES (?, 'Reactivación automática', 'REACTIVADA')
+                """,
+                (mid,)
+            )
+            
+        conn.commit()
+
+
+def obtener_historial_membresias(busqueda: str = None) -> list[dict]:
+    """
+    Devuelve las últimas renovaciones usando JOIN, con opción a filtrar por cédula o nombre.
     """
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
+        base_query = """
             SELECT 
                 m.id,
                 c.nombre AS cliente_nombre,
@@ -470,10 +766,19 @@ def obtener_historial_membresias() -> list[dict]:
             FROM membresias m
             JOIN clientes c ON m.cliente_id = c.id
             JOIN planes p ON m.plan_id = p.id
-            ORDER BY m.id DESC
-            LIMIT 50
+        """
+        
+        if busqueda:
+            query = base_query + """
+                WHERE c.cedula LIKE ? OR c.nombre LIKE ?
+                ORDER BY m.id DESC
             """
-        )
+            like_val = f"%{busqueda}%"
+            cur.execute(query, (like_val, like_val))
+        else:
+            query = base_query + " ORDER BY m.id DESC LIMIT 50"
+            cur.execute(query)
+            
         return [dict(row) for row in cur.fetchall()]
 
 
@@ -518,12 +823,12 @@ def verificar_estado_acceso(cedula: str) -> dict:
         cliente_id = cliente["id"]
         cliente_nombre = cliente["nombre"]
         
-        # b. Buscar la membresía activa más reciente
+        # b. Buscar la membresía activa o suspendida más reciente
         cur.execute(
             """
             SELECT id, fecha_vencimiento, estado 
             FROM membresias 
-            WHERE cliente_id = ? AND estado = 'ACTIVA'
+            WHERE cliente_id = ? AND estado IN ('ACTIVA', 'SUSPENDIDA')
             ORDER BY id DESC LIMIT 1
             """, 
             (cliente_id,)
@@ -534,6 +839,14 @@ def verificar_estado_acceso(cedula: str) -> dict:
             return {
                 "permitido": False,
                 "mensaje": "No tiene membresía activa",
+                "cliente_nombre": cliente_nombre,
+                "dias_restantes": None
+            }
+
+        if membresia["estado"] == "SUSPENDIDA":
+            return {
+                "permitido": False,
+                "mensaje": "Membresía Congelada",
                 "cliente_nombre": cliente_nombre,
                 "dias_restantes": None
             }
@@ -668,3 +981,144 @@ def set_config(clave: str, valor: str) -> None:
         )
         conn.commit()
 
+
+# ════════════════════════════════════════════════════════════════════════════════
+# EXPORTACIÓN DE DATOS
+# ════════════════════════════════════════════════════════════════════════════════
+
+def exportar_ingresos_csv(ruta_archivo: str) -> int:
+    """
+    Exporta el historial completo de ingresos biométricos a un archivo CSV.
+
+    El archivo resultante contiene las columnas:
+        Fecha/Hora | Cédula | Nombre
+
+    Obtiene los datos con un JOIN entre `ingresos_biometricos` y `clientes`
+    para incluir la información personal del miembro en cada registro.
+
+    Args:
+        ruta_archivo: Ruta absoluta del archivo CSV a crear/sobreescribir.
+                      Ejemplo: 'C:/Users/yo/Desktop/Reporte_Ingresos.csv'
+
+    Returns:
+        int: Número de filas exportadas.
+
+    Raises:
+        OSError: Si no se puede escribir en la ruta indicada.
+        sqlite3.Error: Ante cualquier fallo de consulta en la BD.
+
+    Example:
+        n = exportar_ingresos_csv("C:/reportes/ingresos.csv")
+        print(f"{n} registros exportados.")
+    """
+    import csv
+
+    QUERY = """
+        SELECT
+            ib.fecha_hora   AS "Fecha/Hora",
+            c.cedula        AS "Cédula",
+            c.nombre        AS "Nombre"
+        FROM ingresos_biometricos ib
+        JOIN clientes c ON ib.cliente_id = c.id
+        ORDER BY ib.fecha_hora DESC
+    """
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(QUERY)
+        filas = cur.fetchall()
+
+    # Escribir CSV con BOM UTF-8 para que Excel lo abra correctamente
+    with open(ruta_archivo, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=';')
+        # Encabezado
+        writer.writerow(["Fecha/Hora", "Cédula", "Nombre"])
+        # Datos
+        for fila in filas:
+            writer.writerow([fila["Fecha/Hora"], fila["Cédula"], fila["Nombre"]])
+
+    return len(filas)
+
+def exportar_finanzas_csv(ruta_archivo: str) -> int:
+    """
+    Exporta el reporte financiero (ingresos por membresías) a un archivo CSV.
+
+    El archivo resultante contiene las columnas:
+        Fecha de Pago | Cédula | Cliente | Plan Adquirido | Valor Pagado
+
+    Obtiene los datos uniendo membresias, clientes y planes.
+
+    Args:
+        ruta_archivo: Ruta absoluta del archivo CSV a crear/sobreescribir.
+
+    Returns:
+        int: Número de filas exportadas.
+    """
+    import csv
+
+    QUERY = """
+        SELECT
+            m.fecha_inicio AS "Fecha de Pago",
+            c.cedula       AS "Cédula",
+            c.nombre       AS "Cliente",
+            p.nombre       AS "Plan Adquirido",
+            p.precio       AS "Valor Pagado"
+        FROM membresias m
+        JOIN clientes c ON m.cliente_id = c.id
+        JOIN planes p ON m.plan_id = p.id
+        ORDER BY m.fecha_inicio DESC
+    """
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(QUERY)
+        filas = cur.fetchall()
+
+    with open(ruta_archivo, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=';')
+        writer.writerow(["Fecha de Pago", "Cédula", "Cliente", "Plan Adquirido", "Valor Pagado"])
+        for fila in filas:
+            writer.writerow([fila["Fecha de Pago"], fila["Cédula"], fila["Cliente"], fila["Plan Adquirido"], fila["Valor Pagado"]])
+
+    return len(filas)
+
+
+def obtener_historial_congelaciones() -> list[dict]:
+    """
+    Obtiene el historial de congelaciones y reactivaciones de membresías.
+    """
+    QUERY = """
+        SELECT
+            h.fecha, c.cedula, c.nombre AS cliente_nombre, h.accion, h.justificacion
+        FROM historial_congelaciones h
+        JOIN membresias m ON h.membresia_id = m.id
+        JOIN clientes c ON m.cliente_id = c.id
+        ORDER BY h.id DESC
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(QUERY)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def exportar_congelamientos_csv(ruta_archivo: str) -> int:
+    """
+    Exporta la auditoría de congelamientos a un archivo CSV.
+    """
+    import csv
+
+    historial = obtener_historial_congelaciones()
+
+    with open(ruta_archivo, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=';')
+        writer.writerow(["Fecha", "Cédula", "Cliente", "Acción", "Justificación"])
+        for h in historial:
+            writer.writerow([
+                h["fecha"],
+                h["cedula"],
+                h["cliente_nombre"],
+                h["accion"],
+                h["justificacion"]
+            ])
+
+    return len(historial)

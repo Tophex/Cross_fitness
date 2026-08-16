@@ -8,15 +8,18 @@ from .sidebar import (
     NAV_MONITOR,
     NAV_CLIENTES,
     NAV_RENOVACIONES,
+    NAV_ADMIN,
+    NAV_CONFIG,
+    # Aliases de compatibilidad
     NAV_PLANES,
     NAV_REPORTES,
-    NAV_CONFIG,
 )
 from .auth_dialog import show_auth_dialog
 
 __all__ = [
     "Sidebar",
     "NAV_MONITOR", "NAV_CLIENTES", "NAV_RENOVACIONES",
-    "NAV_PLANES",  "NAV_REPORTES", "NAV_CONFIG",
+    "NAV_ADMIN",   "NAV_CONFIG",
+    "NAV_PLANES",  "NAV_REPORTES",
     "show_auth_dialog",
 ]
